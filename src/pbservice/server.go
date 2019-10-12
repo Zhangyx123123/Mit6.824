@@ -122,11 +122,10 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
         if reply.Err == "error" {
 
         } else {
+          fmt.Printf("reply value is %s and primary value is %s backup is %s\n", reply.Value, pb.kvs[args.Key], pb.view.Backup)
           return nil
         }
-        // data on backup is more trusted than primary
       } else {
-        // unreliable backup / backup is down / network partition
         reply.Err = ErrWrongServer
         return nil
       }

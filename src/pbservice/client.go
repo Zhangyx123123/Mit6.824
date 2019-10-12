@@ -83,14 +83,14 @@ func (ck *Clerk) Get(key string) string {
   args := &GetArgs{key}
   var reply GetReply
   ok := call(ck.view.Primary, "PBServer.Get", args, &reply)
-  //fmt.Printf("get from primary %s\n", ck.view.Primary)
+  fmt.Printf("get from primary %s\n", ck.view.Primary)
   for !ok || reply.Err == "error" {
     if reply.Err == "error" {
       //fmt.Printf("get error from backup %s\n", ck.view.Primary)
     }
     ck.view, _ = ck.vs.Ping(ck.view.Viewnum)
     time.Sleep(viewservice.PingInterval)
-    //fmt.Printf("re-get from primary %s\n", ck.view.Primary)
+    fmt.Printf("re-get from primary %s\n", ck.view.Primary)
     ok = call(ck.view.Primary, "PBServer.Get", args, &reply)
   }
   return reply.Value

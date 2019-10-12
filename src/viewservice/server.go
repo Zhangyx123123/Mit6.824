@@ -78,6 +78,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
       Primary: vs.curView.Primary,
       Backup:  clerk,
     }
+    vs.timeStatus[clerk] = time.Now()
   }
 
 
