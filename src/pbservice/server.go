@@ -79,9 +79,13 @@ func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
       if args.DoHash {
         val, hasKey := pb.kvs[args.Key]
         if hasKey {
+          reply.PreviousValue = val
           pb.kvs[args.Key] = strconv.Itoa(int(hash(val + args.Value)))
+          pb.dup[args.Id] = val
         } else {
+          reply.PreviousValue = ""
           pb.kvs[args.Key] = strconv.Itoa(int(hash(args.Value)))
+          pb.dup[args.Id] = ""
         }
       } else {
         pb.kvs[args.Key] = args.Value
@@ -122,7 +126,7 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
         if reply.Err == "error" {
 
         } else {
-          fmt.Printf("reply value is %s and primary value is %s backup is %s\n", reply.Value, pb.kvs[args.Key], pb.view.Backup)
+          //fmt.Printf("reply value is %s and primary value is %s backup is %s\n", reply.Value, pb.kvs[args.Key], pb.view.Backup)
           return nil
         }
       } else {
@@ -137,7 +141,6 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 }
 
 func (pb *PBServer) GetKvsFromPrimary (args *GetKVsArgs, reply *GetKVsReply) error{
-  //fmt.Printf("sync")
   if pb.view.Primary == pb.me {
     reply.KVs = pb.kvs
     reply.Err = OK
