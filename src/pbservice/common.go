@@ -14,7 +14,8 @@ type PutArgs struct {
   Value string
   DoHash bool // For PutHash
   // You'll have to add definitions here.
-
+  Forward bool
+  Id int64
   // Field names must start with capital letters,
   // otherwise RPC will break.
 }
@@ -43,3 +44,20 @@ func hash(s string) uint32 {
   return h.Sum32()
 }
 
+type GetKVsArgs struct {
+}
+
+type GetKVsReply struct {
+  Err Err
+  KVs map[string]string
+}
+
+type PutKVsArgs struct {
+  Key string
+  Value string
+  DoHash bool
+}
+
+type PutKVsReply struct {
+
+}

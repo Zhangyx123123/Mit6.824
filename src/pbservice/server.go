@@ -1,6 +1,9 @@
 package pbservice
 
-import "net"
+import (
+  "net"
+  "strconv"
+)
 import "fmt"
 import "net/rpc"
 import "log"
@@ -32,22 +35,160 @@ type PBServer struct {
   done sync.WaitGroup
   finish chan interface{}
   // Your declarations here.
+  view viewservice.View
+  kvs map[string]string
+  mu sync.Mutex
+  dup map[int64]string
 }
 
 func (pb *PBServer) Put(args *PutArgs, reply *PutReply) error {
   // Your code here.
+  pb.mu.Lock()
+  //defer pb.mu.Unlock()
+  //fmt.Printf("key is %s, value is %s, server is %s\n", args.Key, args.Value, pb.me)
+  duplicate, ok := pb.dup[args.Id]
+  if !ok {
+    if pb.view.Primary == pb.me && !args.Forward {
+      if args.DoHash {
+        val, hasKey := pb.kvs[args.Key]
+        if hasKey {
+          reply.PreviousValue = val
+          //fmt.Printf("pre value is %s\n", val)
+          pb.kvs[args.Key] = strconv.Itoa(int(hash(val + args.Value)))
+          pb.dup[args.Id] = val
+        } else {
+          reply.PreviousValue = ""
+          pb.kvs[args.Key] = strconv.Itoa(int(hash(args.Value)))
+          pb.dup[args.Id] = ""
+        }
+      } else {
+        pb.kvs[args.Key] = args.Value
+      }
+      if pb.view.Backup != "" {
+        args := &PutArgs{args.Key, args.Value, args.DoHash, true, args.Id}
+        var reply PutReply
+        ok := call(pb.view.Backup, "PBServer.Put", args, &reply)
+        for !ok {
+          ok = call(pb.view.Backup, "PBServer.Put", args, &reply)
+        }
+        pb.mu.Unlock()
+        return nil
+          //fmt.Printf("PutKvsToBackup error")
+      }
+    } else if pb.me == pb.view.Backup && args.Forward {
+      if args.DoHash {
+        val, hasKey := pb.kvs[args.Key]
+        if hasKey {
+          pb.kvs[args.Key] = strconv.Itoa(int(hash(val + args.Value)))
+        } else {
+          pb.kvs[args.Key] = strconv.Itoa(int(hash(args.Value)))
+        }
+      } else {
+        pb.kvs[args.Key] = args.Value
+      }
+    } else {
+      reply.Err = "error"
+      pb.mu.Unlock()
+      return nil
+    }
+  } else {
+    //fmt.Printf("duplicate id %s\n",duplicate)
+    reply.PreviousValue = duplicate
+    //fmt.Printf("pre value is %s\n", reply.PreviousValue)
+  }
+  pb.mu.Unlock()
+  return nil
+}
+func (pb *PBServer) GetFromBackup(args *GetArgs, reply *GetReply) error {
+  pb.mu.Lock()
+  defer pb.mu.Unlock()
+  if pb.me != pb.view.Backup {
+    reply.Err = ErrWrongServer
+    return nil
+  }
   return nil
 }
 
 func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
   // Your code here.
+  pb.mu.Lock()
+  defer pb.mu.Unlock()
+  if pb.me == pb.view.Primary{
+    key := args.Key
+    reply.Value = pb.kvs[key]
+    if pb.view.Backup != "" {
+      ok := call(pb.view.Backup, "PBServer.GetFromBackup", args, reply)
+      if ok {
+        if reply.Err == "error" {
+
+        } else {
+          return nil
+        }
+        // data on backup is more trusted than primary
+      } else {
+        // unreliable backup / backup is down / network partition
+        reply.Err = ErrWrongServer
+        return nil
+      }
+    }
+  } else {
+    reply.Err = "error"
+  }
   return nil
 }
 
+func (pb *PBServer) GetKvsFromPrimary (args *GetKVsArgs, reply *GetKVsReply) error{
+  //fmt.Printf("sync")
+  if pb.view.Primary == pb.me {
+    reply.KVs = pb.kvs
+    reply.Err = OK
+  } else {
+    reply.Err = "error"
+  }
+
+  return nil
+}
+
+//func (pb *PBServer) PutKvsToBackup (args *PutKVsArgs, reply *PutKVsReply) error{
+//  if args.DoHash{
+//    val, hasKey := pb.kvs[args.Key]
+//    if hasKey {
+//      pb.kvs[args.Key] = strconv.Itoa(int(hash(val +args.Value)))
+//    } else {
+//      pb.kvs[args.Key] = args.Value
+//    }
+//  } else {
+//    pb.kvs[args.Key] = args.Value
+//  }
+//  return nil
+//}
 
 // ping the viewserver periodically.
 func (pb *PBServer) tick() {
   // Your code here.
+  //fmt.Printf("pb is %s", pb.me)
+  //pb.mu.Lock()
+  //defer pb.mu.Unlock()
+  curView,_ := pb.vs.Ping(pb.view.Viewnum)
+  //fmt.Printf(curView.Primary)
+  //fmt.Printf("ticked: ViewNum: %d, BackUp %s, Primary %s\n", curView.Viewnum, curView.Backup, curView.Primary)
+  //fmt.Printf("pbView: ViewNum: %d, BackUp %s, Primary %s\n", pb.view.Viewnum, pb.view.Backup, pb.view.Primary)
+  if curView.Viewnum != pb.view.Viewnum {
+    //fmt.Printf("curView: ViewNum: %d, BackUp %s, Primary %s\n", curView.Viewnum, curView.Backup, curView.Primary)
+    //fmt.Printf("server %s, pbView: ViewNum: %d, BackUp %s, Primary %s\n", pb.me, pb.view.Viewnum, pb.view.Backup, pb.view.Primary)
+    pb.view = curView
+    //fmt.Printf("after change server %s, pbView: ViewNum: %d, BackUp %s, Primary %s\n", pb.me, pb.view.Viewnum, pb.view.Backup, pb.view.Primary)
+    if pb.view.Backup == pb.me {
+      args := &GetKVsArgs{}
+      var reply GetKVsReply
+      ok := call(pb.view.Primary, "PBServer.GetKvsFromPrimary", args, &reply)
+      if ok {
+        pb.kvs = reply.KVs
+      }
+    }
+  }
+
+
 }
 
 
@@ -65,7 +206,8 @@ func StartServer(vshost string, me string) *PBServer {
   pb.vs = viewservice.MakeClerk(me, vshost)
   pb.finish = make(chan interface{})
   // Your pb.* initializations here.
-
+  pb.kvs = make(map[string]string)
+  pb.dup = make(map[int64]string)
   rpcs := rpc.NewServer()
   rpcs.Register(pb)
 
@@ -110,7 +252,7 @@ func StartServer(vshost string, me string) *PBServer {
         conn.Close()
       }
       if err != nil && pb.dead == false {
-        fmt.Printf("PBServer(%v) accept: %v\n", me, err.Error())
+        //fmt.Printf("PBServer(%v) accept: %v\n", me, err.Error())
         pb.kill()
       }
     }
@@ -124,6 +266,7 @@ func StartServer(vshost string, me string) *PBServer {
   pb.done.Add(1)
   go func() {
     for pb.dead == false {
+      //fmt.Printf("server start tick  server %s, pbView: ViewNum: %d, BackUp %s, Primary %s\n", pb.me, pb.view.Viewnum, pb.view.Backup, pb.view.Primary)
       pb.tick()
       time.Sleep(viewservice.PingInterval)
     }

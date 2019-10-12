@@ -29,6 +29,8 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
   // Your code here.
+  vs.mu.Lock()
+  defer vs.mu.Unlock()
   clerk, viewNum := args.Me, args.Viewnum
   // for starters, let server be primary
   if viewNum == 0  {
@@ -37,8 +39,11 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
         Viewnum: 1,
         Primary: clerk,
       }
+      vs.timeStatus[clerk] = time.Now()
+      reply.View = *vs.curView
+      return nil
     }
-    vs.timeStatus[clerk] = time.Now()
+
   }
 
   if clerk == vs.curView.Primary {
@@ -46,9 +51,16 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
     //fmt.Printf("viewNum %d, curView vn %d, primary %s\n", viewNum, vs.curView.Viewnum, vs.curView.Primary)
     if viewNum == vs.curView.Viewnum {
       vs.ack = true
+      if vs.ack && vs.nextView != nil {
+        //fmt.Printf("From %s, %s, %d\n", vs.curView.Primary, vs.curView.Backup, vs.curView.Viewnum)
+        //fmt.Printf("To %s, %s, %d\n", vs.nextView.Primary, vs.nextView.Backup, vs.nextView.Viewnum)
+        vs.curView = vs.nextView
+        vs.nextView = nil
+        vs.ack = false
+      }
       vs.timeStatus[clerk] = time.Now()
     } else if viewNum == 0 {
-      fmt.Printf("primary reboot\n")
+      fmt.Printf("primary %s reboot\n", args.Me)
       vs.nextView = &View{
         Viewnum: vs.curView.Viewnum+1,
         Primary: vs.curView.Backup,
@@ -79,6 +91,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
   // Your code here.
+
   if vs.curView == nil {
     reply.View = View{0, "", ""}
   } else {
@@ -96,9 +109,12 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
   // Your code here.
+  vs.mu.Lock()
   for clerk, timesta := range vs.timeStatus {
     //fmt.Printf("%d, %d\n",PingInterval * DeadPings,  time.Now().Sub(timesta))
-
+    if clerk == ""{
+      continue
+    }
     if time.Now().Sub(timesta) >= PingInterval * DeadPings {
       //fmt.Printf("timeout for clerk %s\n", clerk)
       if clerk == vs.curView.Primary {
@@ -128,6 +144,7 @@ func (vs *ViewServer) tick() {
     vs.nextView = nil
     vs.ack = false
   }
+  vs.mu.Unlock()
 }
 
 //

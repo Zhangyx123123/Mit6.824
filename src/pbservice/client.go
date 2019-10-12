@@ -1,6 +1,11 @@
 package pbservice
 
-import "viewservice"
+import (
+  "crypto/rand"
+  "math/big"
+  "time"
+  "viewservice"
+)
 import "net/rpc"
 import "fmt"
 
@@ -14,8 +19,15 @@ import "fmt"
 type Clerk struct {
   vs *viewservice.Clerk
   // Your declarations here
+  view viewservice.View
 }
 
+func nrand() int64 {
+  max := big.NewInt(int64(1) << 62)
+  bigx, _ := rand.Int(rand.Reader, max)
+  x := bigx.Int64()
+  return x
+}
 
 func MakeClerk(vshost string, me string) *Clerk {
   ck := new(Clerk)
@@ -54,7 +66,6 @@ func call(srv string, rpcname string,
   if err == nil {
     return true
   }
-
   fmt.Println(err)
   return false
 }
@@ -69,8 +80,20 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
   // Your code here.
-
-  return "???"
+  args := &GetArgs{key}
+  var reply GetReply
+  ok := call(ck.view.Primary, "PBServer.Get", args, &reply)
+  //fmt.Printf("get from primary %s\n", ck.view.Primary)
+  for !ok || reply.Err == "error" {
+    if reply.Err == "error" {
+      //fmt.Printf("get error from backup %s\n", ck.view.Primary)
+    }
+    ck.view, _ = ck.vs.Ping(ck.view.Viewnum)
+    time.Sleep(viewservice.PingInterval)
+    //fmt.Printf("re-get from primary %s\n", ck.view.Primary)
+    ok = call(ck.view.Primary, "PBServer.Get", args, &reply)
+  }
+  return reply.Value
 }
 
 //
@@ -80,7 +103,20 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
 
   // Your code here.
-  return "???"
+  var id int64 = nrand()
+  args := &PutArgs{key, value, dohash, false, id}
+  //fmt.Printf(strconv.Itoa(int(id)) +"\n")
+  var reply PutReply
+  //fmt.Printf("%d\n",id)
+  ok := call(ck.view.Primary, "PBServer.Put", args, &reply)
+  //fmt.Printf("viewNum %d, Backup %s\n", ck.view.Viewnum, ck.view.Backup)
+  for !ok || reply.Err == "error"{
+    //fmt.Printf("wrong%d\n", id)
+    ck.view, _ = ck.vs.Ping(ck.view.Viewnum)
+    time.Sleep(viewservice.PingInterval)
+    ok = call(ck.view.Primary, "PBServer.Put", args, &reply)
+  }
+  return reply.PreviousValue
 }
 
 func (ck *Clerk) Put(key string, value string) {
