@@ -20,7 +20,10 @@ package paxos
 // px.Min() int -- instances before this seq have been forgotten
 //
 
-import "net"
+import (
+  "net"
+  "time"
+)
 import "net/rpc"
 import "log"
 import "os"
@@ -29,6 +32,12 @@ import "sync"
 import "fmt"
 import "math/rand"
 
+type InstanceStatus struct {
+  V_A    interface{}
+  N_P    int
+  N_A    int
+  Finish bool
+}
 
 type Paxos struct {
   mu sync.Mutex
@@ -41,6 +50,40 @@ type Paxos struct {
 
 
   // Your data here.
+  instance map[int]*InstanceStatus
+  min int
+  max int
+  dones []int
+
+}
+
+
+type PrepareArgs struct {
+  Seq int
+  Timestamp int
+}
+
+type PrepareReply struct {
+  Value interface{}
+  Timestamp int
+  Done int
+  Error bool
+}
+
+type AcceptArgs struct {
+  Timestamp int
+  Seq int
+  Value interface{}
+}
+
+type ReplyForAD struct {
+  Error bool
+  Done int
+}
+
+type DecideArgs struct {
+  Seq int
+  Value interface {}
 }
 
 //
@@ -69,7 +112,7 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
     return false
   }
   defer c.Close()
-    
+
   err = c.Call(name, args, reply)
   if err == nil {
     return true
@@ -89,6 +132,9 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
   // Your code here.
+  go func() {
+    px.Propose(seq, v)
+  }()
 }
 
 //
@@ -99,6 +145,11 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
   // Your code here.
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  if seq > px.dones[px.me]{
+   px.dones[px.me] = seq
+  }
 }
 
 //
@@ -108,7 +159,15 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
   // Your code here.
-  return 0
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  maxSeq:=-1
+  for seq, _ := range px.instance {
+   if seq > maxSeq{
+     maxSeq = seq
+   }
+  }
+  return maxSeq
 }
 
 //
@@ -138,10 +197,20 @@ func (px *Paxos) Max() int {
 // life, it will need to catch up on instances that it
 // missed -- the other peers therefor cannot forget these
 // instances.
-// 
+//
 func (px *Paxos) Min() int {
   // You code here.
-  return 0
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  if px.min < 0 {
+    return 0
+  }
+  for seq, _ := range px.instance {
+    if seq < px.min {
+      delete(px.instance, seq)
+    }
+  }
+  return px.min
 }
 
 //
@@ -153,7 +222,18 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (bool, interface{}) {
   // Your code here.
-  return false, nil
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  _, ok := px.instance[seq]
+  if !ok {
+    px.instance[seq] = new(InstanceStatus)
+  }
+  instance := px.instance[seq]
+  if !instance.Finish {
+    return false, nil
+  } else {
+    return true, instance.V_A
+  }
 }
 
 
@@ -166,6 +246,209 @@ func (px *Paxos) Kill() {
   px.dead = true
   if px.l != nil {
     px.l.Close()
+  }
+}
+func (px *Paxos) Prepare(seq int, v interface{}) (int, interface{}, bool) {
+  tstamp := (int(time.Now().UnixNano())) + px.me
+  px.mu.Lock()
+  args := &PrepareArgs{Seq:seq, Timestamp:tstamp}
+  px.mu.Unlock()
+  count:=0
+  replyP := 0
+  replyV := v
+  for index, peer := range px.peers {
+    var reply PrepareReply
+    var status bool
+    if peer == px.peers[px.me] {
+      px.PrepareReceive(args, &reply)
+      status = true
+    } else{
+      status = call(peer, "Paxos.PrepareReceive", args, &reply)
+    }
+    if status && reply.Error == false {
+      count++
+      if reply.Timestamp > replyP {
+        replyP = reply.Timestamp
+        replyV = reply.Value
+      }
+    }
+    px.statusUpdate(reply.Done, index)
+  }
+  //fmt.Printf("%d\n",count)
+  if count > len(px.peers) / 2 {
+    //fmt.Printf("a\n")
+    return tstamp, replyV, true
+  } else {
+    //fmt.Printf("b\n")
+    return 0, nil, false
+  }
+}
+func (px *Paxos) Propose(seq int, v interface{}) {
+  for px.ErrorFree(seq) {
+    t, v, ok := px.Prepare(seq, v);
+    if ok == false {
+      continue
+    }
+    ok = px.Accept(seq, t, v)
+    if ok == false {
+      continue
+    }
+    px.Decide(seq, px.dones[px.me], v)
+  }
+}
+
+func (px *Paxos) PrepareReceive(args *PrepareArgs, reply *PrepareReply) error{
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  //fmt.Printf("prepare receive start\n")
+  _, ok := px.instance[args.Seq]
+  if !ok {
+    px.instance[args.Seq] = &InstanceStatus{
+      V_A: nil,
+      N_P: 0,
+      N_A: 0,
+    }
+  }
+  instance := px.instance[args.Seq]
+  if args.Timestamp > instance.N_P {
+    reply.Error = false
+    instance.N_P = args.Timestamp
+    reply.Timestamp = instance.N_A
+    reply.Value = instance.V_A
+  } else {
+    reply.Error = true
+  }
+
+  reply.Done = px.dones[px.me]
+  return nil
+}
+func (px *Paxos) DecideReceive (args *DecideArgs, reply *ReplyForAD) error{
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  //fmt.Printf("decide receive start\n")
+  _, ok := px.instance[args.Seq]
+  if !ok {
+    px.instance[args.Seq] = &InstanceStatus{
+      V_A:    nil,
+      N_P:    0,
+      N_A:    0,
+      Finish: false,
+    }
+  }
+
+  instance := px.instance[args.Seq]
+  instance.Finish = true
+  instance.V_A = args.Value
+  if args.Seq > px.max{
+    px.max = args.Seq
+  }
+  reply.Error = false
+  reply.Done = px.dones[px.me]
+  return nil
+}
+func (px *Paxos) Accept(seq int, t int, v interface{}) bool {
+  px.mu.Lock()
+  args := &AcceptArgs{
+    Timestamp: t,
+    Seq:       seq,
+    Value:     v,
+  }
+  px.mu.Unlock()
+  count := 0
+  major := len(px.peers) / 2
+  for index, peer := range(px.peers){
+    var reply ReplyForAD
+    var status bool
+    if index == px.me {
+      px.AcceptReceive(args, &reply)
+      status = true
+    } else {
+      status = call(peer, "Paxos.AcceptReceive", args, &reply)
+    }
+
+    if status && reply.Error == false{
+      count+=1
+    }
+    px.statusUpdate(reply.Done, index)
+  }
+  //fmt.Printf("%d\n",count)
+  if count > major {
+    return true
+  }
+  return false
+}
+
+func (px *Paxos) Decide(seq int, done int, v interface{}) error{
+  px.mu.Lock()
+  args := &DecideArgs{
+    Seq:       seq,
+    Value:     v,
+  }
+  px.mu.Unlock()
+  for index, peer := range(px.peers){
+    var reply ReplyForAD
+    if peer != px.peers[px.me] {
+       call(peer, "Paxos.DecideReceive", args, &reply)
+    } else {
+      px.DecideReceive(args, &reply)
+    }
+    px.statusUpdate(reply.Done, index)
+  }
+
+  return nil
+}
+
+func (px *Paxos) AcceptReceive(args *AcceptArgs, reply *ReplyForAD) error {
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  //fmt.Printf("accept receive start\n")
+  _, ok := px.instance[args.Seq]
+  if !ok {
+    px.instance[args.Seq] = &InstanceStatus{
+      V_A:    nil,
+      N_P:    0,
+      N_A:    0,
+      Finish: false,
+    }
+  }
+  instance := px.instance[args.Seq]
+  //fmt.Printf("%d, %d\n",args.Timestamp, instance.N_P)
+  if args.Timestamp >= instance.N_P {
+    reply.Error = false
+    instance.V_A = args.Value
+    instance.N_A = args.Timestamp
+    instance.N_P = args.Timestamp
+  } else {
+    reply.Error = true
+  }
+
+  reply.Done = px.dones[px.me]
+  return nil
+}
+
+func (px *Paxos) statusUpdate(seq int, index int) {
+  if seq < 0 {
+    return
+  }
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  px.dones[index] = seq
+  min := px.dones[px.me]
+  for _, done := range px.dones {
+    if done < min {
+      min = done
+    }
+  }
+  px.min = min + 1
+}
+
+func (px *Paxos) ErrorFree(seq int) bool {
+  px.mu.Lock()
+  defer px.mu.Unlock()
+  if instance, ok := px.instance[seq]; ok && instance.Finish || seq < px.min {
+    return false
+  } else {
+    return true
   }
 }
 
@@ -181,6 +464,13 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
 
   // Your initialization code here.
+  px.instance = make(map[int]*InstanceStatus)
+  px.dones = make([]int, len(px.peers))
+  for i:=0; i < len(peers); i++{
+    px.dones[i] = -1
+  }
+  px.min = -1
+  px.max = -1
 
   if rpcs != nil {
     // caller will create socket &c
@@ -197,10 +487,10 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
       log.Fatal("listen error: ", e);
     }
     px.l = l
-    
+
     // please do not change any of the following code,
     // or do anything to subvert it.
-    
+
     // create a thread to accept RPC connections
     go func() {
       for px.dead == false {
@@ -236,3 +526,4 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
   return px
 }
+
