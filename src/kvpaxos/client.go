@@ -1,18 +1,29 @@
 package kvpaxos
 
-import "net/rpc"
+import (
+  "crypto/rand"
+  "math/big"
+  "net/rpc"
+)
 import "fmt"
 
 type Clerk struct {
   servers []string
   // You will have to modify this struct.
+  me int64
 }
-
+func nrand() int64 {
+  max := big.NewInt(int64(1) << 62)
+  bigx, _ := rand.Int(rand.Reader, max)
+  x := bigx.Int64()
+  return x
+}
 
 func MakeClerk(servers []string) *Clerk {
   ck := new(Clerk)
   ck.servers = servers
   // You'll have to add code here.
+  ck.me = nrand()
   return ck
 }
 
@@ -39,7 +50,7 @@ func call(srv string, rpcname string,
     return false
   }
   defer c.Close()
-    
+
   err := c.Call(rpcname, args, reply)
   if err == nil {
     return true
@@ -55,8 +66,18 @@ func call(srv string, rpcname string,
 // keeps trying forever in the face of all other errors.
 //
 func (ck *Clerk) Get(key string) string {
-  // You will have to modify this function.
-  return ""
+  args := &GetArgs{key, ck.me, nrand()}
+  i := 0
+  var reply GetReply
+  ok := call(ck.servers[i], "KVPaxos.Get", args, &reply)
+  for !ok && reply.Err != OK{
+    if reply.Err == ErrNoKey{
+      return ""
+    }
+    ok = call(ck.servers[(i + 1) % len(ck.servers)], "KVPaxos.Get", args, &reply)
+  }
+  return reply.Value
+
 }
 
 //
@@ -64,8 +85,14 @@ func (ck *Clerk) Get(key string) string {
 // keeps trying until it succeeds.
 //
 func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
-  // You will have to modify this function.
-  return ""
+  args := &PutArgs{key, value, dohash, ck.me, nrand()}
+  i := 0
+  var reply PutReply
+  ok := call(ck.servers[i], "KVPaxos.Put", args, &reply)
+  for !ok {
+    ok = call(ck.servers[(i + 1) % len(ck.servers)], "KVPaxos.Put", args, &reply)
+  }
+  return reply.PreviousValue
 }
 
 func (ck *Clerk) Put(key string, value string) {
