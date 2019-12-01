@@ -1,6 +1,9 @@
 package shardmaster
 
-import "net"
+import (
+  "net"
+  "time"
+)
 import "fmt"
 import "net/rpc"
 import "log"
@@ -20,35 +23,107 @@ type ShardMaster struct {
   px *paxos.Paxos
 
   configs []Config // indexed by config num
+  seq int
 }
 
 
 type Op struct {
   // Your data here.
+  GroupId int64
+  Operation string
+  Pid int64
+  Shard int
+  Servers []string
 }
 
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) error {
   // Your code here.
-
+  sm.mu.Lock()
+  defer sm.mu.Unlock()
+  op := &Op{
+    GroupId:   args.GID,
+    Pid:       nrand(),
+    Operation: "Join",
+    Shard:     0,
+    Servers:   args.Servers,
+  }
+  sm.log(op)
+  //fmt.Printf("group length after join gid %d is %d\n", args.GID, len(sm.configs[len(sm.configs) - 1].Groups))
   return nil
+}
+
+func (sm *ShardMaster) log(op *Op) {
+  seq := sm.seq
+  to := 10 * time.Millisecond
+  for {
+    if decided, instance := sm.px.Status(seq); decided {
+      seop := instance.(Op)
+      if op.Pid == seop.Pid {
+        sm.operate(op)
+        break
+      } else {
+        sm.operate(&seop)
+      }
+      seq++
+      to = 10 * time.Millisecond
+    } else {
+      sm.px.Start(seq, *op)
+
+      time.Sleep(to)
+      if to < 10 * time.Second {
+        to *= 2
+      }
+    }
+  }
+  sm.px.Done(seq)
+  sm.seq = seq + 1
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) error {
   // Your code here.
-
+  sm.mu.Lock()
+  defer sm.mu.Unlock()
+  op := &Op{
+    GroupId:   args.GID,
+    Operation: "Leave",
+    Pid:       nrand(),
+    Shard:     0,
+    Servers:   nil,
+  }
+  sm.log(op)
+  //fmt.Printf("group length after leave gid %d is %d\n", args.GID, len(sm.configs[len(sm.configs) - 1].Groups))
   return nil
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) error {
   // Your code here.
-
+  sm.mu.Lock()
+  defer sm.mu.Unlock()
+  op := &Op{
+    Pid:       nrand(),
+  }
+  sm.log(op)
+  sm.operateMove(args.Shard, args.GID)
   return nil
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
   // Your code here.
-
+  sm.mu.Lock()
+  defer sm.mu.Unlock()
+  op := &Op{
+    GroupId:   0,
+    Pid:       nrand(),
+    Shard:     0,
+    Servers:   nil,
+  }
+  sm.log(op)
+  if args.Num < 0 || args.Num > len(sm.configs) - 1 {
+    reply.Config = sm.configs[len(sm.configs) - 1]
+  } else {
+    reply.Config = sm.configs[args.Num]
+  }
   return nil
 }
 
@@ -59,12 +134,138 @@ func (sm *ShardMaster) Kill() {
   sm.px.Kill()
 }
 
+func (sm *ShardMaster) operateLeave(gid int64) {
+  old := sm.configs[len(sm.configs) - 1]
+  var newConfig Config
+  newConfig.Num = len(sm.configs)
+  newConfig.Groups = map[int64][]string{}
+  for k, v := range old.Groups {
+    newConfig.Groups[k] = v
+  }
+  if _, exist := newConfig.Groups[gid]; exist {
+    delete(newConfig.Groups, gid)
+  }
+  old_shards := old.Shards
+  count := make(map[int64]int)
+  new_shards := [len(old_shards)]int64{}
+  average_len_shards := NShards / (len(newConfig.Groups))
+  if average_len_shards == 0 {
+    average_len_shards = 1
+  }
+  if len(newConfig.Groups) == 1 {
+    for k,_ := range old_shards {
+      for g, _ := range newConfig.Groups {
+        new_shards[k] = g
+      }
+    }
+  } else {
+    var new_gids []int64
+    for k, _ := range newConfig.Groups{
+      new_gids = append(new_gids, k)
+    }
+    for k, v := range old_shards {
+      if v == gid {
+        for _, g := range new_gids {
+          if count[g] < average_len_shards {
+            new_shards[k] = g
+            count[g] += 1
+            break
+          }
+        }
+      } else {
+        new_shards[k] = v
+        count[v] += 1
+        if count[v] > average_len_shards {
+          for k1, _ := range newConfig.Groups {
+            if count[k1] < average_len_shards {
+              new_shards[k] = k1
+              count[k1] += 1
+              break
+            }
+          }
+        }
+      }
+    }
+  }
+  newConfig.Shards = new_shards
+  //fmt.Printf("Leave gid %d average %d --- %v\n", gid, average_len_shards, newConfig.Shards)
+
+  sm.configs = append(sm.configs, newConfig)
+}
+
+func (sm *ShardMaster) operateJoin(gid int64, servers []string) {
+  old := sm.configs[len(sm.configs) - 1]
+  var newConfig Config
+  newConfig.Num = len(sm.configs)
+  newConfig.Groups = map[int64][]string{}
+  for k, v := range old.Groups {
+    newConfig.Groups[k] = v
+  }
+  if _, exist := newConfig.Groups[gid]; !exist {
+    newConfig.Groups[gid] = servers
+  }
+  old_shards := old.Shards
+
+  new_shards := [len(old_shards)]int64{}
+  average_len_shards := NShards / (len(newConfig.Groups))
+  if average_len_shards == 0 {
+    average_len_shards = 1
+  }
+  if len(newConfig.Groups) == 1 {
+    for k,_ := range old_shards {
+      new_shards[k] = gid
+    }
+  } else {
+    count := make(map[int64]int)
+    for k, v := range old_shards {
+      new_shards[k] = v
+      count[v] += 1
+      if count[v] > average_len_shards {
+        for k1, _ := range newConfig.Groups {
+          if count[k1] < average_len_shards {
+            new_shards[k] = k1
+            count[k1] += 1
+            break
+          }
+        }
+      }
+    }
+
+  }
+  newConfig.Shards = new_shards
+  //fmt.Printf("Join %d --- %v\n", gid, newConfig.Shards)
+  sm.configs = append(sm.configs, newConfig)
+}
+func (sm *ShardMaster) operateMove(shard int, gid int64) {
+  old := sm.configs[len(sm.configs) - 1]
+  var newConfig Config
+  newConfig.Num = len(sm.configs)
+  newConfig.Groups = map[int64][]string{}
+  for k, v := range old.Groups {
+    newConfig.Groups[k] = v
+  }
+  new_shards := [NShards]int64{}
+  new_shards = old.Shards
+  new_shards[shard] = gid
+  newConfig.Shards = new_shards
+  sm.configs = append(sm.configs, newConfig)
+}
+
+func (sm *ShardMaster) operate(xop *Op) {
+  if xop.Operation == "Join"{
+    sm.operateJoin(xop.GroupId, xop.Servers)
+  } else if xop.Operation == "Leave" {
+    sm.operateLeave(xop.GroupId)
+  } else if xop.Operation == "Move"{
+    sm.operateMove(xop.Shard, xop.GroupId)
+  }
+}
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Paxos to
 // form the fault-tolerant shardmaster service.
 // me is the index of the current server in servers[].
-// 
+//
 func StartServer(servers []string, me int) *ShardMaster {
   gob.Register(Op{})
 
