@@ -1,6 +1,9 @@
 package shardkv
 
-import "net"
+import (
+  "net"
+  "strconv"
+)
 import "fmt"
 import "net/rpc"
 import "log"
@@ -25,6 +28,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 type Op struct {
   // Your definitions here.
+  Operation string
+  Pid int64
+  Key string
+  Value string
+  DoHash bool
+  replyValue string
 }
 
 
@@ -40,16 +49,54 @@ type ShardKV struct {
   gid int64 // my replica group ID
 
   // Your definitions here.
+  seq int
+  config shardmaster.Config
+  kvs map[string]string
+  preValue map[int64]string
+
 }
 
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) error {
   // Your code here.
+  kv.mu.Lock()
+  defer kv.mu.Unlock()
+  op := Op{
+    Operation: "Get",
+    Pid:       args.Id,
+    Key:       args.Key,
+    Value:     "",
+    DoHash:    false,
+  }
+  kv.log(&op)
+  value, exist := kv.preValue[op.Pid]
+  if exist {
+    reply.Err = OK
+    reply.Value = value
+  }
   return nil
 }
 
 func (kv *ShardKV) Put(args *PutArgs, reply *PutReply) error {
   // Your code here.
+  kv.mu.Lock()
+  defer kv.mu.Unlock()
+  op := Op{
+    Operation: "Put",
+    Pid:       0,
+    Key:       args.Key,
+    Value:     args.Value,
+    DoHash:    args.DoHash,
+  }
+  //seq := kv.seq
+  kv.log(&op)
+  value, exist := kv.preValue[op.Pid]
+  if exist {
+    reply.Err = OK
+    reply.PreviousValue = value
+  }
+  //reply.Err = OK
+  //reply.PreviousValue = op.replyValue
   return nil
 }
 
@@ -66,6 +113,46 @@ func (kv *ShardKV) kill() {
   kv.dead = true
   kv.l.Close()
   kv.px.Kill()
+}
+
+func (kv *ShardKV) log(op *Op) {
+  seq := kv.seq
+  to := 10 * time.Millisecond
+  for {
+    if decided, instance := kv.px.Status(seq); decided {
+      seop := instance.(Op)
+      if op.Pid == seop.Pid {
+        if op.Operation == "Put" {
+          if op.DoHash {
+            kv.preValue[op.Pid] = kv.kvs[op.Key]
+            kv.kvs[op.Key] = strconv.Itoa(int(hash(kv.kvs[op.Key] + op.Value)))
+            op.replyValue = kv.preValue[op.Pid]
+          } else {
+            kv.preValue[op.Pid] = kv.kvs[op.Key]
+            kv.kvs[op.Key] = op.Value
+          }
+        } else if op.Operation == "Get"{
+          kv.preValue[op.Pid] = kv.kvs[op.Key]
+          DPrintf("value is %v\n", kv.preValue[op.Pid])
+          op.replyValue = kv.preValue[op.Pid]
+        }
+        DPrintf("%d",seq)
+        break
+      } else{
+
+      }
+      seq++
+      to = 10 * time.Millisecond
+    } else {
+      kv.px.Start(seq, *op)
+      time.Sleep(to)
+      if to < 10 * time.Second {
+        to *= 2
+      }
+    }
+  }
+  kv.px.Done(seq)
+  kv.seq = seq + 1
 }
 
 //
@@ -85,6 +172,9 @@ func StartServer(gid int64, shardmasters []string,
   kv.me = me
   kv.gid = gid
   kv.sm = shardmaster.MakeClerk(shardmasters)
+
+  kv.kvs = make(map[string]string)
+  kv.preValue = make(map[int64]string)
 
   // Your initialization code here.
   // Don't call Join().

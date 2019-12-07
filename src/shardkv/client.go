@@ -92,6 +92,7 @@ func (ck *Clerk) Get(key string) string {
       for _, srv := range servers {
         args := &GetArgs{}
         args.Key = key
+        args.Id = nrand()
         var reply GetReply
         ok := call(srv, "ShardKV.Get", args, &reply)
         if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
@@ -130,6 +131,7 @@ func (ck *Clerk) PutExt(key string, value string, dohash bool) string {
         args := &PutArgs{}
         args.Key = key
         args.Value = value
+        args.Id = nrand()
         args.DoHash = dohash
         var reply PutReply
         ok := call(srv, "ShardKV.Put", args, &reply)
